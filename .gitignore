@@ -1,0 +1,19 @@
+# SwiftPM / Xcode build output
+.build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+
+# Assembled app bundle (make-app.sh)
+Stackd.app/
+boxd-bar.app/
+
+# Brainstorming mockups (superpowers visual companion)
+.superpowers/
+
+# macOS
+.DS_Store
+
+# Local notes for Claude Code (kept on disk, not in the repo)
+CLAUDE.md
+HANDOFF.md

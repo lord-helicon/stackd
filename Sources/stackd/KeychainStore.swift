@@ -1,0 +1,66 @@
+import Foundation
+import Security
+
+/// API key storage in the macOS Keychain (generic password, service `li.rol.dev.stackd`).
+enum KeychainStore {
+    private static let service = "li.rol.dev.stackd"
+    private static let account = "api-key"
+    /// Service of the app's former name (boxd-bar); migrated once in `loadAPIKey()`.
+    private static let legacyService = "sh.boxd.bar"
+
+    private static var query: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+
+    private static func read(_ q: [String: Any]) -> String? {
+        var q = q
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func loadAPIKey() -> String? {
+        if let key = read(query) { return key }
+        // One-time migration from the legacy boxd-bar service (may trigger one Keychain prompt).
+        let legacy: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: legacyService,
+            kSecAttrAccount as String: account,
+        ]
+        guard let key = read(legacy) else { return nil }
+        if saveAPIKey(key) { SecItemDelete(legacy as CFDictionary) }
+        return key
+    }
+
+    @discardableResult
+    static func saveAPIKey(_ key: String) -> Bool {
+        let data = Data(key.utf8)
+        // Update in place so a failed write never destroys the previously working key.
+        let status = SecItemUpdate(query as CFDictionary, [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+        ] as CFDictionary)
+        switch status {
+        case errSecSuccess:
+            return true
+        case errSecItemNotFound:
+            var q = query
+            q[kSecValueData as String] = data
+            q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            return SecItemAdd(q as CFDictionary, nil) == errSecSuccess
+        default:
+            return false
+        }
+    }
+
+    static func deleteAPIKey() {
+        SecItemDelete(query as CFDictionary)
+    }
+}

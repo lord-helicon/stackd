@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch/PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build, test, bundle
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Swift 6 language mode, Swift Testing and Icon Composer (.icon) compilation need a recent
+      # Xcode; runner images can lag behind, so pick the newest one installed.
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          swift --version
+
+      # The project is kept warning-free; fail on any warning.
+      - name: Build
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test
+
+      # No signing identity on the runner, so make-app.sh signs ad hoc. This checks that the
+      # bundle assembles and the app icon compiles with actool. No API keys or live boxd calls.
+      - name: Bundle
+        run: ./make-app.sh
