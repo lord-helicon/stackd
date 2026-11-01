@@ -47,23 +47,11 @@ enum KeychainStore {
     @discardableResult
     static func saveAPIKey(_ key: String) -> Bool {
         guard !isDisabled else { return false }
-        let data = Data(key.utf8)
-        // Update in place so a failed write never destroys the previously working key.
-        let status = SecItemUpdate(query as CFDictionary, [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ] as CFDictionary)
-        switch status {
-        case errSecSuccess:
-            return true
-        case errSecItemNotFound:
-            var q = query
-            q[kSecValueData as String] = data
-            q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            return SecItemAdd(q as CFDictionary, nil) == errSecSuccess
-        default:
-            return false
-        }
+        SecItemDelete(query as CFDictionary)
+        var q = query
+        q[kSecValueData as String] = Data(key.utf8)
+        q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        return SecItemAdd(q as CFDictionary, nil) == errSecSuccess
     }
 
     static func deleteAPIKey() {
