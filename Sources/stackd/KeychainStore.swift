@@ -7,6 +7,10 @@ enum KeychainStore {
     private static let account = "api-key"
     /// Service of the app's former name (boxd-bar); migrated once in `loadAPIKey()`.
     private static let legacyService = "sh.boxd.bar"
+    /// Only the real app bundle may touch the Keychain. In any other process (`swift test` runs in
+    /// `swiftpm-testing-helper`, CI, a bare binary) every call is a no-op, so no test can read,
+    /// overwrite or delete the user's real key — an early test run once deleted it.
+    static let isDisabled = Bundle.main.bundleIdentifier != "li.rol.dev.stackd"
 
     private static var query: [String: Any] {
         [
@@ -27,6 +31,7 @@ enum KeychainStore {
     }
 
     static func loadAPIKey() -> String? {
+        guard !isDisabled else { return nil }
         if let key = read(query) { return key }
         // One-time migration from the legacy boxd-bar service (may trigger one Keychain prompt).
         let legacy: [String: Any] = [
@@ -41,6 +46,7 @@ enum KeychainStore {
 
     @discardableResult
     static func saveAPIKey(_ key: String) -> Bool {
+        guard !isDisabled else { return false }
         let data = Data(key.utf8)
         // Update in place so a failed write never destroys the previously working key.
         let status = SecItemUpdate(query as CFDictionary, [
@@ -61,6 +67,7 @@ enum KeychainStore {
     }
 
     static func deleteAPIKey() {
+        guard !isDisabled else { return }
         SecItemDelete(query as CFDictionary)
     }
 }
