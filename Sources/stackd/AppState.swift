@@ -52,6 +52,8 @@ private func isCancellation(_ error: Error) -> Bool {
 
     private let client = BoxdClient()
     @ObservationIgnored private var restoring = true
+    /// True only for instances built by `demo(...)`: never touches the network, Keychain or defaults.
+    @ObservationIgnored private let isDemo: Bool
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var refreshLoop: Task<Void, Never>?
     @ObservationIgnored private var bootstrapRetryTask: Task<Void, Never>?
@@ -81,6 +83,7 @@ private func isCancellation(_ error: Error) -> Bool {
     static let shared = AppState()
 
     private init() {
+        isDemo = false
         let d = UserDefaults.standard
         // One-time migration of settings from the legacy boxd-bar defaults domain.
         let settingKeys = ["pollInterval", "scopeMode", "orgName"]
@@ -102,6 +105,21 @@ private func isCancellation(_ error: Error) -> Bool {
         }
         log.debug("AppState created")
         Task { await bootstrap() }
+    }
+
+    /// Demo/screenshot-only: a pre-filled, signed-in instance that does no I/O. It skips `bootstrap`, the
+    /// wake observer and the defaults migration, and `menuDidOpen`, `refresh`, `refreshIdentity` and
+    /// `perform` are no-ops while `isDemo`, so nothing can reach `BoxdClient`. Used by tests only.
+    private init(demo identity: Identity, vms: [Vm], lastRefresh: Date) {
+        isDemo = true
+        restoring = false
+        auth = .authenticated(identity)
+        self.vms = Self.sort(vms)
+        self.lastRefresh = lastRefresh
+    }
+
+    static func demo(identity: Identity, vms: [Vm], lastRefresh: Date) -> AppState {
+        AppState(demo: identity, vms: vms, lastRefresh: lastRefresh)
     }
 
     deinit {
@@ -258,7 +276,7 @@ private func isCancellation(_ error: Error) -> Bool {
 
     /// Called by the menu window each time it opens.
     func menuDidOpen() {
-        guard isAuthenticated else { return }
+        guard !isDemo, isAuthenticated else { return }
         if lastRefresh.map({ Date.now.timeIntervalSince($0) > 5 }) ?? true {
             Task { await refresh() }
         }
@@ -276,7 +294,7 @@ private func isCancellation(_ error: Error) -> Bool {
 
     /// Re-reads identity (credits balance). Failure leaves auth untouched, except a rejected key.
     private func refreshIdentity(ifOlderThan age: TimeInterval) async {
-        guard case .authenticated(let current) = auth, !identityInFlight else { return }
+        guard !isDemo, case .authenticated(let current) = auth, !identityInFlight else { return }
         if let last = lastIdentityCheck, Date.now.timeIntervalSince(last) < age { return }
         let gen = sessionGen
         identityInFlight = true
@@ -319,7 +337,7 @@ private func isCancellation(_ error: Error) -> Bool {
     /// Refreshes the VM list. If one is already running, queues exactly one more run and waits for it,
     /// so settings changes and post-action refreshes are never dropped.
     func refresh() async {
-        guard isAuthenticated else { return }
+        guard !isDemo, isAuthenticated else { return }
         if let loop = refreshLoop {
             pendingRefresh = true
             await loop.value
@@ -377,6 +395,7 @@ private func isCancellation(_ error: Error) -> Bool {
     // MARK: Actions
 
     func perform(_ action: VmAction, on vm: Vm) async {
+        guard !isDemo else { return }
         let gen = sessionGen
         setNotice(vm.id, "\(action.progressLabel)…")
         do {

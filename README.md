@@ -12,7 +12,12 @@
 
 </div>
 
-<!-- TODO: screenshot of the open menu (machine list with a row's action menu). -->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
+    <img src="docs/screenshot-light.png" width="420" alt="The stackd menu bar panel: a header with the account name and credit balance, five machines with coloured status dots (two running, one standby, one hibernated, one stopped) and an actions button on each row, and a footer with refresh, settings and quit buttons.">
+  </picture>
+</p>
 
 stackd is a native menu bar app for [boxd](https://boxd.sh) cloud machines. See every machine at a glance. Start, stop, pause or wake it without opening a terminal.
 
@@ -119,6 +124,7 @@ swift test --filter MessagesTests             # one suite
 - **Layout** (`Sources/stackd/`): `WireFormat.swift` (minimal proto3 codec) → `Messages.swift` (API models) → `BoxdClient.swift` (grpc-web over `URLSession`, token exchange) → `AppState.swift` (state, polling, actions) → `MenuBarView.swift` (UI). `StatusMark.swift` draws the menu bar mark. `KeychainStore.swift` stores the key.
 - **API trace:** `log stream --level debug --predicate 'subsystem == "li.rol.dev.stackd"'` (in zsh use `/usr/bin/log`).
 - **Menu bar mark previews:** `STACKD_PREVIEW_DIR=/some/dir swift test` writes PNGs of every state.
+- **README screenshot:** `STACKD_SCREENSHOT_DIR=$PWD/docs swift test --filter ScreenshotTests` renders `docs/screenshot-{dark,light}.png` from the real views with invented data.
 - **App icon:** `Tools/render-icon.swift` draws the artwork. `Tools/update-icon.sh` regenerates `Resources/AppIcon.icns` and the layered `Resources/AppIcon.icon`.
 - **CI:** every pull request and push to `main` builds with warnings as errors, runs the tests and assembles the app on macOS.
 
