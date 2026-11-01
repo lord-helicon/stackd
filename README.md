@@ -127,6 +127,7 @@ swift test --filter MessagesTests             # one suite
 - **README screenshot:** `STACKD_SCREENSHOT_DIR=$PWD/docs swift test --filter ScreenshotTests` renders `docs/screenshot-{dark,light}.png` from the real views with invented data.
 - **App icon:** `Tools/render-icon.swift` draws the artwork. `Tools/update-icon.sh` regenerates `Resources/AppIcon.icns` and the layered `Resources/AppIcon.icon`.
 - **CI:** every pull request and push to `main` builds with warnings as errors, runs the tests and assembles the app on macOS.
+- **Releasing:** bump the version, merge, push a tag; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
