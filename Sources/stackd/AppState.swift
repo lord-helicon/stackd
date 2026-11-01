@@ -32,6 +32,9 @@ struct KeyStore: Sendable {
         load: { KeychainStore.loadAPIKey() },
         save: { KeychainStore.saveAPIKey($0) },
         delete: { KeychainStore.deleteAPIKey() })
+
+    /// Stores nothing; used by the demo instance.
+    static let inert = KeyStore(load: { nil }, save: { _ in false }, delete: {})
 }
 
 /// Root state: auth, VM list, poll loop, actions. Lives for the app's lifetime.
@@ -50,24 +53,25 @@ struct KeyStore: Sendable {
     /// Transient per-VM feedback ("Starting…", error text). A refresh clears only notices set before it began.
     var notices: [String: String] = [:]
 
-    // Settings (persisted). didSet side effects are skipped while `restoring` and when the value didn't change.
+    // Settings (persisted). didSet side effects are skipped while `restoring`, for the demo instance, and when
+    // the value didn't change.
     var pollInterval: Double = 15 {
         didSet {
-            guard !restoring, pollInterval != oldValue else { return }
+            guard !restoring, !isDemo, pollInterval != oldValue else { return }
             defaults.set(pollInterval, forKey: "pollInterval")
             startPolling()
         }
     }
     var scopeMode: ScopeMode = .allContexts {
         didSet {
-            guard !restoring, scopeMode != oldValue else { return }
+            guard !restoring, !isDemo, scopeMode != oldValue else { return }
             defaults.set(scopeMode.rawValue, forKey: "scopeMode")
             Task { await refresh() }
         }
     }
     var orgName: String = "" {
         didSet {
-            guard !restoring, orgName != oldValue else { return }
+            guard !restoring, !isDemo, orgName != oldValue else { return }
             defaults.set(orgName, forKey: "orgName")
             if scopeMode == .org { Task { await refresh() } }
         }
@@ -151,12 +155,14 @@ struct KeyStore: Sendable {
     }
 
     /// Demo/screenshot-only: a pre-filled, signed-in instance that does no I/O. It skips `bootstrap`, the
-    /// wake observer and the defaults migration, and `menuDidOpen`, `refresh`, `refreshIdentity` and
-    /// `perform` are no-ops while `isDemo`, so nothing can reach `BoxdClient`. Used by tests only.
+    /// wake observer and the defaults migration; every entry point that could reach `BoxdClient`, the key
+    /// store or the defaults (`menuDidOpen`, `refresh`, `refreshIdentity`, `perform`, `retryBootstrap`,
+    /// `submitAPIKey`, `signOut`, the settings `didSet`s) is a no-op while `isDemo`, and its key store is
+    /// inert. Used by tests only.
     private init(demo identity: Identity, vms: [Vm], lastRefresh: Date) {
         isDemo = true
         client = BoxdClient()
-        keyStore = .keychain
+        keyStore = .inert
         defaults = .standard
         runsBackgroundWork = false
         restoring = false
@@ -265,6 +271,7 @@ struct KeyStore: Sendable {
     }
 
     func retryBootstrap() async {
+        guard !isDemo else { return }
         bootstrapRetryTask?.cancel()
         bootstrapRetryTask = nil
         auth = .loading
@@ -273,6 +280,7 @@ struct KeyStore: Sendable {
     }
 
     func submitAPIKey(_ raw: String) async {
+        guard !isDemo else { return }
         let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
         bootstrapRetryTask?.cancel()
@@ -304,6 +312,7 @@ struct KeyStore: Sendable {
     }
 
     func signOut() {
+        guard !isDemo else { return }
         invalidateSession()
         bootstrapRetryTask?.cancel()
         bootstrapRetryTask = nil

@@ -610,3 +610,23 @@ struct AppStateTests {
         #expect(await h.fake.calls.filter { if case .listVms = $0 { true } else { false } }.isEmpty)
     }
 }
+
+/// Kody review on the screenshot PR: the demo instance must not reach defaults, the key store or the network.
+@Suite @MainActor struct DemoIsolationTests {
+    @Test func demoIgnoresSettingsAndSignInPaths() async throws {
+        let before = UserDefaults.standard.dictionaryRepresentation()
+        let identity = try Identity(proto: Data())
+        let demo = AppState.demo(identity: identity, vms: [], lastRefresh: .now)
+        demo.pollInterval = 5
+        demo.scopeMode = .org
+        demo.orgName = "demo-org"
+        await demo.submitAPIKey("bxd_demo")
+        await demo.retryBootstrap()
+        demo.signOut()
+        guard case .authenticated = demo.auth else { Issue.record("demo left the signed-in state"); return }
+        let after = UserDefaults.standard.dictionaryRepresentation()
+        for key in ["pollInterval", "scopeMode", "orgName"] {
+            #expect((before[key] as? NSObject) == (after[key] as? NSObject), "demo wrote \(key)")
+        }
+    }
+}
