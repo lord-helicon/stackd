@@ -23,14 +23,21 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history, so the tag can be checked against main
 
-      - name: Check tag matches Info.plist version
+      - name: Check tag matches Info.plist version and is on main
         env:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
           if [ "$TAG" != "v$VERSION" ]; then
             echo "::error::Tag $TAG does not match CFBundleShortVersionString $VERSION in Resources/Info.plist. Delete the tag, run Tools/bump-version.sh, merge, and tag again."
+            exit 1
+          fi
+          # Only commits that landed on main may be released (not an old or side-branch commit).
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag $TAG points to a commit that is not on main. Tag a commit on main instead."
             exit 1
           fi
           echo "Releasing stackd $VERSION"
