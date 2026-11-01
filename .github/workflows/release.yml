@@ -1,0 +1,145 @@
+name: Release
+
+# Releasing: bump the version (Tools/bump-version.sh), merge, then push a tag vX.Y.Z.
+# See docs/RELEASING.md.
+on:
+  push:
+    tags: ['v*.*.*']
+
+# Never run two releases at once (they would race on the tap's main branch). Don't cancel a
+# release that is already in progress.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  verify:
+    name: Verify, build, test
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches Info.plist version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Tag $TAG does not match CFBundleShortVersionString $VERSION in Resources/Info.plist. Delete the tag, run Tools/bump-version.sh, merge, and tag again."
+            exit 1
+          fi
+          echo "Releasing stackd $VERSION"
+
+      # Swift 6 language mode, Swift Testing and Icon Composer (.icon) compilation need a recent
+      # Xcode; runner images can lag behind, so pick the newest one installed.
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          swift --version
+
+      - name: Build
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test
+
+      - name: Bundle
+        run: ./make-app.sh
+
+  github-release:
+    name: GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # No checkout: gh talks to the API; --repo says which repository.
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, leaving it as is."
+          else
+            gh release create "$TAG" --repo "$REPO" --title "stackd ${TAG#v}" --generate-notes --verify-tag
+          fi
+
+  homebrew-tap:
+    name: Update Homebrew tap
+    needs: github-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Require TAP_GITHUB_TOKEN
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$TAP_GITHUB_TOKEN" ]; then
+            echo "::error::Secret TAP_GITHUB_TOKEN is not set. Create a fine-grained personal access token with Contents: read and write on lord-helicon/homebrew-tap only, then add it under Settings > Secrets and variables > Actions in $REPO (see docs/RELEASING.md). Then re-run this job."
+            exit 1
+          fi
+
+      - name: Compute tarball sha256
+        id: tarball
+        run: |
+          URL="https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz"
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL --retry 2 -o stackd.tar.gz "$URL" && [ -s stackd.tar.gz ]; then
+              SHA=$(sha256sum stackd.tar.gz | cut -d' ' -f1)
+              echo "url=$URL" >> "$GITHUB_OUTPUT"
+              echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+              echo "$URL -> $SHA"
+              exit 0
+            fi
+            echo "Archive not available yet (attempt $attempt), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Could not download $URL"
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          repository: lord-helicon/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          ref: main
+          path: tap
+
+      - name: Update stackd.rb
+        working-directory: tap
+        env:
+          URL: ${{ steps.tarball.outputs.url }}
+          SHA: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          VERSION="${TAG#v}"
+          URL_LINE="  url \"$URL\""
+          SHA_LINE="  sha256 \"$SHA\""
+          if grep -qxF "$URL_LINE" stackd.rb && grep -qxF "$SHA_LINE" stackd.rb; then
+            echo "stackd.rb already points at $TAG with this sha256, nothing to do."
+            exit 0
+          fi
+          # Only the formula's own url/sha256 lines (two-space indent); head/license etc. untouched.
+          sed -E -i \
+            -e "s|^  url \".*\"\$|$URL_LINE|" \
+            -e "s|^  sha256 \".*\"\$|$SHA_LINE|" \
+            stackd.rb
+          grep -qxF "$URL_LINE" stackd.rb || { echo "::error::url line was not updated"; exit 1; }
+          grep -qxF "$SHA_LINE" stackd.rb || { echo "::error::sha256 line was not updated"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stackd.rb
+          git commit -m "stackd $VERSION"
+          git push origin HEAD:main

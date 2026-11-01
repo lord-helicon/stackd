@@ -121,6 +121,7 @@ swift test --filter MessagesTests             # one suite
 - **Menu bar mark previews:** `STACKD_PREVIEW_DIR=/some/dir swift test` writes PNGs of every state.
 - **App icon:** `Tools/render-icon.swift` draws the artwork. `Tools/update-icon.sh` regenerates `Resources/AppIcon.icns` and the layered `Resources/AppIcon.icon`.
 - **CI:** every pull request and push to `main` builds with warnings as errors, runs the tests and assembles the app on macOS.
+- **Releasing:** bump the version, merge, push a tag; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
