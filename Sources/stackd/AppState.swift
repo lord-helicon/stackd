@@ -92,10 +92,6 @@ struct KeyStore: Sendable {
     @ObservationIgnored private var pendingRefresh = false
     /// Bumped on sign-out, auth rejection and successful sign-in; results from an older session are dropped.
     @ObservationIgnored private var sessionGen = 0
-    /// Bumped by every `submitAPIKey`; only the latest submission may save the key or touch auth state.
-    @ObservationIgnored private var submissionGen = 0
-    /// Client reset queued by `signOut()`; sign-in paths await it so it can't wipe a newer key.
-    @ObservationIgnored private var pendingReset: Task<Void, Never>?
     @ObservationIgnored private var noticeStamps: [String: Date] = [:]
     @ObservationIgnored private var lastActionDone: Date?
     @ObservationIgnored private var lastIdentityCheck: Date?
@@ -223,16 +219,8 @@ struct KeyStore: Sendable {
         lastError = BoxdError.authRejected.errorDescription
     }
 
-    private func awaitPendingReset() async {
-        while let reset = pendingReset {
-            await reset.value
-            if pendingReset == reset { pendingReset = nil }
-        }
-    }
-
     private func bootstrap() async {
         log.debug("bootstrap (signing in from the saved key)")
-        await awaitPendingReset()
         let gen = sessionGen
         guard let key = keyStore.load(), !key.isEmpty else {
             auth = .unauthenticated
@@ -288,16 +276,11 @@ struct KeyStore: Sendable {
         auth = .loading
         lastError = nil
         keychainWarning = nil
-        submissionGen += 1
-        let sub = submissionGen
         let gen = sessionGen
-        func isCurrent() -> Bool { sub == submissionGen && gen == sessionGen }
         do {
-            await awaitPendingReset()
-            guard isCurrent() else { return }
             try await client.setAPIKey(key)
             let identity = try await client.whoami()
-            guard isCurrent() else { return }
+            guard gen == sessionGen else { return }
             if !keyStore.save(key) {
                 keychainWarning = "Couldn't save the API key to the Keychain — you'll need to enter it again next launch."
             }
@@ -305,7 +288,7 @@ struct KeyStore: Sendable {
             lastError = keychainWarning
             await refresh()
         } catch {
-            guard isCurrent() else { return }
+            guard gen == sessionGen else { return }
             auth = .unauthenticated
             if !isCancellation(error) { lastError = error.localizedDescription }
         }
@@ -318,7 +301,7 @@ struct KeyStore: Sendable {
         bootstrapRetryTask = nil
         bootstrapAttempts = 0
         keyStore.delete()
-        pendingReset = Task { [client] in await client.reset() }
+        Task { [client] in await client.reset() }
         vms = []
         notices = [:]
         noticeStamps = [:]
