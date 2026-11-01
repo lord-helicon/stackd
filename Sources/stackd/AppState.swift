@@ -11,6 +11,29 @@ private func isCancellation(_ error: Error) -> Bool {
     error is CancellationError || (error as? URLError)?.code == .cancelled
 }
 
+/// The slice of `BoxdClient` that `AppState` uses; tests substitute a fake.
+protocol BoxdAPI: Sendable {
+    func setAPIKey(_ key: String) async throws
+    func reset() async
+    func whoami() async throws -> Identity
+    func listVms(org: String, allContexts: Bool) async throws -> [Vm]
+    func performVmAction(_ action: VmAction, vmID: String) async throws
+}
+
+extension BoxdClient: BoxdAPI {}
+
+/// Where the API key lives. Production uses the Keychain; tests substitute an in-memory store.
+struct KeyStore: Sendable {
+    var load: @Sendable () -> String?
+    var save: @Sendable (String) -> Bool
+    var delete: @Sendable () -> Void
+
+    static let keychain = KeyStore(
+        load: { KeychainStore.loadAPIKey() },
+        save: { KeychainStore.saveAPIKey($0) },
+        delete: { KeychainStore.deleteAPIKey() })
+}
+
 /// Root state: auth, VM list, poll loop, actions. Lives for the app's lifetime.
 @Observable @MainActor final class AppState {
     enum AuthState: Hashable {
@@ -31,26 +54,30 @@ private func isCancellation(_ error: Error) -> Bool {
     var pollInterval: Double = 15 {
         didSet {
             guard !restoring, pollInterval != oldValue else { return }
-            UserDefaults.standard.set(pollInterval, forKey: "pollInterval")
+            defaults.set(pollInterval, forKey: "pollInterval")
             startPolling()
         }
     }
     var scopeMode: ScopeMode = .allContexts {
         didSet {
             guard !restoring, scopeMode != oldValue else { return }
-            UserDefaults.standard.set(scopeMode.rawValue, forKey: "scopeMode")
+            defaults.set(scopeMode.rawValue, forKey: "scopeMode")
             Task { await refresh() }
         }
     }
     var orgName: String = "" {
         didSet {
             guard !restoring, orgName != oldValue else { return }
-            UserDefaults.standard.set(orgName, forKey: "orgName")
+            defaults.set(orgName, forKey: "orgName")
             if scopeMode == .org { Task { await refresh() } }
         }
     }
 
-    private let client = BoxdClient()
+    private let client: any BoxdAPI
+    @ObservationIgnored private let keyStore: KeyStore
+    @ObservationIgnored private let defaults: UserDefaults
+    /// False in tests: no wake observer, no bootstrap at init, no poll loop.
+    @ObservationIgnored private let runsBackgroundWork: Bool
     @ObservationIgnored private var restoring = true
     /// True only for instances built by `demo(...)`: never touches the network, Keychain or defaults.
     @ObservationIgnored private let isDemo: Bool
@@ -80,12 +107,13 @@ private func isCancellation(_ error: Error) -> Bool {
     /// The one instance. `init` has side effects (sign-in, wake observer), and SwiftUI may build the
     /// `App` struct — and evaluate a `@State` initial value — more than once, so the app must not
     /// construct AppState itself (a discarded second instance caused an extra sign-in at launch).
-    static let shared = AppState()
+    static let shared: AppState = {
+        migrateLegacySettings(into: .standard)
+        return AppState()
+    }()
 
-    private init() {
-        isDemo = false
-        let d = UserDefaults.standard
-        // One-time migration of settings from the legacy boxd-bar defaults domain.
+    /// One-time migration of settings from the legacy boxd-bar defaults domain.
+    private static func migrateLegacySettings(into d: UserDefaults) {
         let settingKeys = ["pollInterval", "scopeMode", "orgName"]
         if !settingKeys.contains(where: { d.object(forKey: $0) != nil }),
            let old = UserDefaults(suiteName: "sh.boxd.bar") {
@@ -93,11 +121,26 @@ private func isCancellation(_ error: Error) -> Bool {
                 if let v = old.object(forKey: k) { d.set(v, forKey: k) }
             }
         }
+    }
+
+    private convenience init() {
+        self.init(client: BoxdClient(), keyStore: .keychain, defaults: .standard, autostart: true)
+    }
+
+    /// `autostart: false` (tests) skips the wake observer, the initial `bootstrap` and the poll loop.
+    init(client: any BoxdAPI, keyStore: KeyStore, defaults: UserDefaults, autostart: Bool) {
+        isDemo = false
+        self.client = client
+        self.keyStore = keyStore
+        self.defaults = defaults
+        runsBackgroundWork = autostart
+        let d = defaults
         if let pi = d.object(forKey: "pollInterval") as? Double, pi > 0 { pollInterval = pi }
         if let sm = d.string(forKey: "scopeMode"), let m = ScopeMode(rawValue: sm) { scopeMode = m }
         if let on = d.string(forKey: "orgName") { orgName = on }
         restoring = false
 
+        guard autostart else { return }
         _ = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -112,6 +155,10 @@ private func isCancellation(_ error: Error) -> Bool {
     /// `perform` are no-ops while `isDemo`, so nothing can reach `BoxdClient`. Used by tests only.
     private init(demo identity: Identity, vms: [Vm], lastRefresh: Date) {
         isDemo = true
+        client = BoxdClient()
+        keyStore = .keychain
+        defaults = .standard
+        runsBackgroundWork = false
         restoring = false
         auth = .authenticated(identity)
         self.vms = Self.sort(vms)
@@ -181,7 +228,7 @@ private func isCancellation(_ error: Error) -> Bool {
         log.debug("bootstrap (signing in from the saved key)")
         await awaitPendingReset()
         let gen = sessionGen
-        guard let key = KeychainStore.loadAPIKey(), !key.isEmpty else {
+        guard let key = keyStore.load(), !key.isEmpty else {
             auth = .unauthenticated
             return
         }
@@ -243,7 +290,7 @@ private func isCancellation(_ error: Error) -> Bool {
             try await client.setAPIKey(key)
             let identity = try await client.whoami()
             guard isCurrent() else { return }
-            if !KeychainStore.saveAPIKey(key) {
+            if !keyStore.save(key) {
                 keychainWarning = "Couldn't save the API key to the Keychain — you'll need to enter it again next launch."
             }
             didSignIn(identity)
@@ -261,7 +308,7 @@ private func isCancellation(_ error: Error) -> Bool {
         bootstrapRetryTask?.cancel()
         bootstrapRetryTask = nil
         bootstrapAttempts = 0
-        KeychainStore.deleteAPIKey()
+        keyStore.delete()
         pendingReset = Task { [client] in await client.reset() }
         vms = []
         notices = [:]
@@ -320,7 +367,7 @@ private func isCancellation(_ error: Error) -> Bool {
 
     private func startPolling() {
         pollTask?.cancel()
-        guard isAuthenticated else { return }
+        guard runsBackgroundWork, isAuthenticated else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 // Delay is recomputed every iteration so state changes speed up or slow down polling.
