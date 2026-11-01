@@ -25,8 +25,11 @@ stackd is an independent project. It is not made or endorsed by boxd.
 With [Homebrew](https://brew.sh):
 
 ```bash
+brew trust --formula lord-helicon/tap/stackd
 brew install lord-helicon/tap/stackd
 ```
+
+Homebrew only loads formulas from third-party taps after you trust them, which is what the first line does.
 
 Homebrew builds stackd from source, so you need Xcode 26 or later (the Command Line Tools alone are not enough). The first install takes a few minutes. Then open the app:
 
