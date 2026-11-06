@@ -540,6 +540,8 @@ struct AppStateTests {
         #expect(h.state.auth == .unauthenticated)
         #expect(h.state.lastError == BoxdError.authRejected.errorDescription)
         #expect(!h.state.isRefreshing)
+        // The rejected key is dropped from the client as well.
+        await h.waitUntil("client reset") { await h.fake.calls.contains(.resetFinished) }
 
         // The session is dead: further refreshes do nothing.
         await h.fake.clearCalls()

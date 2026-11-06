@@ -12,13 +12,15 @@ enum KeychainStore {
     /// overwrite or delete the user's real key — an early test run once deleted it.
     static let isDisabled = Bundle.main.bundleIdentifier != "li.rol.dev.stackd"
 
-    private static var query: [String: Any] {
+    private static func query(service: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
     }
+
+    private static var query: [String: Any] { query(service: service) }
 
     private static func read(_ q: [String: Any]) -> String? {
         var q = q
@@ -34,11 +36,7 @@ enum KeychainStore {
         guard !isDisabled else { return nil }
         if let key = read(query) { return key }
         // One-time migration from the legacy boxd-bar service (may trigger one Keychain prompt).
-        let legacy: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyService,
-            kSecAttrAccount as String: account,
-        ]
+        let legacy = query(service: legacyService)
         guard let key = read(legacy) else { return nil }
         if saveAPIKey(key) { SecItemDelete(legacy as CFDictionary) }
         return key
@@ -69,5 +67,7 @@ enum KeychainStore {
     static func deleteAPIKey() {
         guard !isDisabled else { return }
         SecItemDelete(query as CFDictionary)
+        // Also the legacy item, or the next launch would re-import it.
+        SecItemDelete(query(service: legacyService) as CFDictionary)
     }
 }

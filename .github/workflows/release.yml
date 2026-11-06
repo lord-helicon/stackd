@@ -21,16 +21,23 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0  # full history, so the tag can be checked against main
 
       - name: Check tag matches Info.plist version and is on main
+        id: check
         env:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::CFBundleShortVersionString '$VERSION' is not X.Y.Z. Use Tools/bump-version.sh."
+            exit 1
+          fi
           if [ "$TAG" != "v$VERSION" ]; then
             echo "::error::Tag $TAG does not match CFBundleShortVersionString $VERSION in Resources/Info.plist. Delete the tag, run Tools/bump-version.sh, merge, and tag again."
             exit 1
@@ -40,6 +47,8 @@ jobs:
             echo "::error::Tag $TAG points to a commit that is not on main. Tag a commit on main instead."
             exit 1
           fi
+          # The tap job checks that the tarball it publishes is this exact commit.
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "Releasing stackd $VERSION"
 
       # Swift 6 language mode, Swift Testing and Icon Composer (.icon) compilation need a recent
@@ -83,20 +92,24 @@ jobs:
 
   homebrew-tap:
     name: Update Homebrew tap
-    needs: github-release
+    needs: [verify, github-release]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}
+    # Holds TAP_GITHUB_TOKEN as an environment secret; restrict the environment to v*.*.* tags
+    # (docs/RELEASING.md) so workflows on other branches or tags cannot read the token.
+    environment: homebrew-tap
     env:
       TAG: ${{ github.ref_name }}
       REPO: ${{ github.repository }}
+      VERIFIED_SHA: ${{ needs.verify.outputs.sha }}
     steps:
       - name: Require TAP_GITHUB_TOKEN
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           if [ -z "$TAP_GITHUB_TOKEN" ]; then
-            echo "::error::Secret TAP_GITHUB_TOKEN is not set. Create a fine-grained personal access token with Contents: read and write on lord-helicon/homebrew-tap only, then add it under Settings > Secrets and variables > Actions in $REPO (see docs/RELEASING.md). Then re-run this job."
+            echo "::error::Secret TAP_GITHUB_TOKEN is not set. Create a fine-grained personal access token with Contents: read and write on lord-helicon/homebrew-tap only, then add it as a secret of the homebrew-tap environment in $REPO (see docs/RELEASING.md). Then re-run this job."
             exit 1
           fi
 
@@ -106,6 +119,12 @@ jobs:
           URL="https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz"
           for attempt in 1 2 3 4 5 6; do
             if curl -fsSL --retry 2 -o stackd.tar.gz "$URL" && [ -s stackd.tar.gz ]; then
+              # The tag is a name and can move after verify ran: publish only the verified commit.
+              COMMIT=$(gzip -dc stackd.tar.gz | git get-tar-commit-id || true)
+              if [ "$COMMIT" != "$VERIFIED_SHA" ]; then
+                echo "::error::$URL contains commit '${COMMIT:-unknown}', but verify checked $VERIFIED_SHA. Did the tag move? Not updating the tap."
+                exit 1
+              fi
               SHA=$(sha256sum stackd.tar.gz | cut -d' ' -f1)
               echo "url=$URL" >> "$GITHUB_OUTPUT"
               echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
@@ -118,18 +137,20 @@ jobs:
           echo "::error::Could not download $URL"
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: lord-helicon/homebrew-tap
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
           ref: main
           path: tap
+          persist-credentials: false  # the token is passed to the one push below only
 
       - name: Update stackd.rb
         working-directory: tap
         env:
           URL: ${{ steps.tarball.outputs.url }}
           SHA: ${{ steps.tarball.outputs.sha256 }}
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           VERSION="${TAG#v}"
           URL_LINE="  url \"$URL\""
@@ -149,4 +170,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add stackd.rb
           git commit -m "stackd $VERSION"
-          git push origin HEAD:main
+          git push "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/lord-helicon/homebrew-tap.git" HEAD:main
