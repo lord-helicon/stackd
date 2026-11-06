@@ -219,6 +219,8 @@ struct KeyStore: Sendable {
 
     private func authWasRejected() {
         invalidateSession()
+        // Drop the rejected key/JWT from the client too (awaited by the next sign-in).
+        pendingReset = Task { [client] in await client.reset() }
         auth = .unauthenticated
         lastError = BoxdError.authRejected.errorDescription
     }

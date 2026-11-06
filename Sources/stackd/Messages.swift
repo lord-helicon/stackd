@@ -60,8 +60,26 @@ struct Vm: Identifiable, Hashable {
     var memoryGiB: UInt64 { memoryBytes >> 30 }
     var sizeLabel: String { "\(vcpu)×\(memoryGiB)G" }
     var url: URL? {
-        guard !name.isEmpty, !accessDomain.isEmpty else { return nil }
-        return URL(string: "https://\(name).\(accessDomain)")
+        // Both fields come from the server: pin the link to a plain hostname.
+        guard Self.isDNSLabel(name), Self.isHostname(accessDomain) else { return nil }
+        var c = URLComponents()
+        c.scheme = "https"
+        c.host = "\(name).\(accessDomain)"
+        return c.url
+    }
+
+    /// 1–63 ASCII letters/digits/hyphens, not starting or ending with a hyphen.
+    private static func isDNSLabel(_ s: String) -> Bool {
+        let b = Array(s.utf8)
+        guard (1...63).contains(b.count), b.first != UInt8(ascii: "-"), b.last != UInt8(ascii: "-") else { return false }
+        return b.allSatisfy {
+            ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x5a) || ($0 >= 0x61 && $0 <= 0x7a) || $0 == UInt8(ascii: "-")
+        }
+    }
+
+    /// Dot-separated labels, no empty label, at most 253 bytes.
+    private static func isHostname(_ s: String) -> Bool {
+        s.utf8.count <= 253 && s.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { isDNSLabel(String($0)) }
     }
 
     init(proto data: Data) throws {

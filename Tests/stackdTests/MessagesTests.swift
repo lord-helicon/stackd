@@ -22,6 +22,22 @@ struct MessagesTests {
         return w
     }
 
+    @Test func vmURLIsPinnedToPlainHostnames() throws {
+        func url(_ name: String, _ domain: String = "boxd.sh") throws -> URL? {
+            try Vm(proto: vmMessage(name: name, domain: domain).data).url
+        }
+        #expect(try url("web")?.absoluteString == "https://web.boxd.sh")
+        #expect(try url("a-b1", "x.example.com")?.absoluteString == "https://a-b1.x.example.com")
+        for bad in ["a/b", "a#b", "a?b", "a@b", "a:b", "a b", "a.b", "-web", "web-", "", String(repeating: "a", count: 64)] {
+            #expect(try url(bad) == nil, "name \(bad)")
+        }
+        let longDomain = Array(repeating: String(repeating: "a", count: 60), count: 5).joined(separator: ".")
+        for bad in ["boxd.sh/x", "boxd.sh#x", "boxd.sh?x", "evil.com@boxd.sh", "boxd.sh:99", "box d.sh",
+                    "boxd..sh", ".boxd.sh", "boxd.sh.", "-boxd.sh", "boxd-.sh", "", String(repeating: "a", count: 64) + ".sh", longDomain] {
+            #expect(try url("web", bad) == nil, "domain \(bad)")
+        }
+    }
+
     @Test func decodesVm() throws {
         let vm = try Vm(proto: vmMessage().data)
         #expect(vm.id == "vm-1")

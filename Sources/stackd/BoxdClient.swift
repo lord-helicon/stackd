@@ -30,6 +30,17 @@ enum BoxdError: LocalizedError {
     }
 }
 
+/// Refuses every redirect so the API key / Bearer token can't follow one;
+/// the 3xx surfaces as `BoxdError.http`.
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 /// grpc-web transport + JWT exchange for the boxd API. Dependency-free:
 /// requests are hand-framed (`[flag:1][len:4 BE][payload]`) and posted as
 /// `application/grpc-web+proto` to https://boxd.sh:9443.
@@ -44,7 +55,7 @@ actor BoxdClient {
     private var apiKey: String?
     private var jwt: String?
     private var jwtExpiresAt = Date.distantPast
-    private let session = URLSession.shared
+    private let session: URLSession
 
     private struct Token: Sendable {
         let token: String
@@ -55,13 +66,17 @@ actor BoxdClient {
     /// whether it is still the current one (reset / a newer setAPIKey replace it).
     private var inflight: (id: UInt64, key: String, task: Task<Token, any Error>)?
     private var nextExchangeID: UInt64 = 0
+    /// Bumped whenever the credential itself changes (reset, or a new key committed),
+    /// never on a same-key JWT refresh. Lets a 16-retry detect it would switch credentials.
+    private var credentialGen: UInt64 = 0
 
     /// Exchange window: re-exchange when < 10 min of JWT life remain.
     private static let jwtRefreshSkew: TimeInterval = 600
     /// Used when neither `expires_at` nor the JWT `exp` claim is usable.
     private static let fallbackJWTLifetime: TimeInterval = 55 * 60
 
-    init() {
+    init(configuration: URLSessionConfiguration = .default) {
+        session = URLSession(configuration: configuration, delegate: NoRedirectDelegate(), delegateQueue: nil)
         // Literals are known-valid; fall back to a bare URL rather than crash.
         apiURL = URL(string: "https://boxd.sh:9443") ?? URL(fileURLWithPath: "/")
         consoleURL = URL(string: "https://app.boxd.sh") ?? URL(fileURLWithPath: "/")
@@ -79,6 +94,7 @@ actor BoxdClient {
     func reset() {
         inflight?.task.cancel()
         inflight = nil
+        credentialGen &+= 1
         apiKey = nil
         jwt = nil
         jwtExpiresAt = .distantPast
@@ -140,7 +156,10 @@ actor BoxdClient {
 
     private func commit(_ t: Token, key: String, id: UInt64, commitsKey: Bool) throws -> Token {
         guard !Task.isCancelled, inflight?.id == id else { throw CancellationError() }
-        if commitsKey { apiKey = key }
+        if commitsKey {
+            if apiKey != key { credentialGen &+= 1 }
+            apiKey = key
+        }
         jwt = t.token
         jwtExpiresAt = t.expiresAt
         return t
@@ -200,13 +219,17 @@ actor BoxdClient {
 
     // MARK: grpc-web transport
 
-    /// Retries once with a fresh JWT on UNAUTHENTICATED (16).
+    /// Retries once with a fresh JWT on UNAUTHENTICATED (16), unless the credential
+    /// changed meanwhile (then the call is dropped as a cancellation).
     private func grpcCall(_ method: String, payload: Data) async throws -> Data {
         let token = try await ensureJWT()
+        let gen = credentialGen
         do {
             return try await grpcRoundTrip(method, payload: payload, token: token)
         } catch BoxdError.grpc(16, _) {
+            guard credentialGen == gen else { throw CancellationError() }
             let fresh = try await ensureJWT(rejected: token)
+            guard credentialGen == gen else { throw CancellationError() }
             return try await grpcRoundTrip(method, payload: payload, token: fresh)
         }
     }
